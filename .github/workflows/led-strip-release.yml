@@ -17,8 +17,9 @@ on:
 permissions:
   contents: write
 
-env:
-  PATCH_REV: '1'   # verhogen als led-strip.patch verandert
+concurrency:
+  group: led-strip-release
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -34,9 +35,12 @@ jobs:
         run: |
           TAG=$(git -c versionsort.suffix=- ls-remote --tags --refs --sort=-v:refname \
                 https://github.com/mainsail-crew/mainsail.git 'v*' | head -1 | sed 's#.*refs/tags/##')
+          # versie = officiele versie + korte hash van de patch,
+          # zodat elke wijziging aan het paneel een nieuwe update wordt
+          HASH=$(sha256sum fork/.github/led-strip.patch | cut -c1-7)
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${TAG}-led.${PATCH_REV}" >> "$GITHUB_OUTPUT"
-          echo "Upstream: $TAG -> release ${TAG}-led.${PATCH_REV}"
+          echo "version=${TAG}-led-${HASH}" >> "$GITHUB_OUTPUT"
+          echo "Upstream: $TAG -> release ${TAG}-led-${HASH}"
 
       - name: Bestaat deze release al?
         id: exists
