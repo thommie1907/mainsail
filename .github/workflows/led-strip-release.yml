@@ -1,0 +1,89 @@
+name: LED-strip release
+
+# Bouwt de nieuwste officiele Mainsail-release met het LED-strip-paneel
+# (.github/led-strip.patch) en publiceert mainsail.zip als release,
+# zodat Moonraker's Update Manager hem kan installeren.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - '.github/led-strip.patch'
+      - '.github/workflows/led-strip-release.yml'
+  schedule:
+    - cron: '17 4 * * 1'   # elke maandag: nieuwe officiele versie? dan opnieuw bouwen
+
+permissions:
+  contents: write
+
+env:
+  PATCH_REV: '1'   # verhogen als led-strip.patch verandert
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Repo ophalen (voor de patch)
+        uses: actions/checkout@v4
+        with:
+          path: fork
+
+      - name: Nieuwste officiele Mainsail-versie bepalen
+        id: up
+        run: |
+          TAG=$(git -c versionsort.suffix=- ls-remote --tags --refs --sort=-v:refname \
+                https://github.com/mainsail-crew/mainsail.git 'v*' | head -1 | sed 's#.*refs/tags/##')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG}-led.${PATCH_REV}" >> "$GITHUB_OUTPUT"
+          echo "Upstream: $TAG -> release ${TAG}-led.${PATCH_REV}"
+
+      - name: Bestaat deze release al?
+        id: exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.up.outputs.version }}" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Release bestaat al, niets te doen."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Officiele Mainsail ophalen
+        if: steps.exists.outputs.skip == 'false' || github.event_name != 'schedule'
+        run: git clone --depth 1 --branch "${{ steps.up.outputs.tag }}" https://github.com/mainsail-crew/mainsail.git src
+
+      - name: LED-strip-patch toepassen
+        if: steps.exists.outputs.skip == 'false' || github.event_name != 'schedule'
+        working-directory: src
+        run: git apply --verbose ../fork/.github/led-strip.patch
+
+      - uses: actions/setup-node@v4
+        if: steps.exists.outputs.skip == 'false' || github.event_name != 'schedule'
+        with:
+          node-version: 22
+
+      - name: Bouwen
+        if: steps.exists.outputs.skip == 'false' || github.event_name != 'schedule'
+        working-directory: src
+        env:
+          CYPRESS_INSTALL_BINARY: '0'
+          RELEASE_OWNER: ${{ github.repository_owner }}
+        run: |
+          npm version --no-git-tag-version "${{ steps.up.outputs.version }}"
+          npm ci --no-audit --no-fund
+          npm run build
+          unzip -p dist/mainsail.zip release_info.json
+
+      - name: Release publiceren
+        if: steps.exists.outputs.skip == 'false' || github.event_name != 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="${{ steps.up.outputs.version }}"
+          gh release delete "$V" -R "${{ github.repository }}" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$V" -R "${{ github.repository }}" \
+            --target "${{ github.sha }}" --latest \
+            --title "$V" \
+            --notes "Mainsail ${{ steps.up.outputs.tag }} met het extra dashboardpaneel LED-strip (elke led apart een kleur). Broncode van de wijziging: led-strip.patch (GPLv3)." \
+            src/dist/mainsail.zip fork/.github/led-strip.patch
