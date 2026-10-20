@@ -1,0 +1,531 @@
+From 40ee8956300779d19eb3317d4dc1ebc552b9a9e3 Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Tue, 20 Oct 2026 14:43:44 +0000
+Subject: [PATCH] feat: add LED strip panel (per-LED color control)
+
+---
+ src/components/mixins/dashboard.ts      |   3 +
+ src/components/panels/LedStripPanel.vue | 360 ++++++++++++++++++++++++
+ src/locales/en.json                     |  19 ++
+ src/locales/nl.json                     |  19 ++
+ src/pages/Dashboard.vue                 |   2 +
+ src/plugins/build-release_info.ts       |   2 +-
+ src/store/gui/getters.ts                |   8 +
+ src/store/variables.ts                  |   1 +
+ 8 files changed, 413 insertions(+), 1 deletion(-)
+ create mode 100644 src/components/panels/LedStripPanel.vue
+
+diff --git a/src/components/mixins/dashboard.ts b/src/components/mixins/dashboard.ts
+index 7da3685..8f38282 100644
+--- a/src/components/mixins/dashboard.ts
++++ b/src/components/mixins/dashboard.ts
+@@ -11,6 +11,7 @@ import {
+     mdiGamepad,
+     mdiInformation,
+     mdiLedStrip,
++    mdiLedStripVariant,
+     mdiPrinter3dNozzle,
+     mdiThermometerLines,
+     mdiWebcam,
+@@ -65,6 +66,8 @@ export default class DashboardMixin extends BaseMixin {
+                 return mdiDipSwitch
+             case 'led-effects':
+                 return mdiLedStrip
++            case 'led-strip':
++                return mdiLedStripVariant
+             case 'temperature':
+                 return mdiThermometerLines
+             case 'miniconsole':
+diff --git a/src/components/panels/LedStripPanel.vue b/src/components/panels/LedStripPanel.vue
+new file mode 100644
+index 0000000..35f7305
+--- /dev/null
++++ b/src/components/panels/LedStripPanel.vue
+@@ -0,0 +1,360 @@
++<template>
++    <panel
++        v-if="klipperReadyForGui && strips.length"
++        :icon="mdiLedStripVariant"
++        :title="$t('Panels.LedStripPanel.Headline')"
++        :collapsible="true"
++        card-class="led-strip-panel">
++        <template #buttons>
++            <v-tooltip left>
++                <template #activator="{ on, attrs }">
++                    <v-btn
++                        v-bind="attrs"
++                        icon
++                        tile
++                        :disabled="printerIsPrintingOnly"
++                        v-on="on"
++                        @click="fillAll">
++                        <v-icon>{{ mdiFormatColorFill }}</v-icon>
++                    </v-btn>
++                </template>
++                <span>{{ $t('Panels.LedStripPanel.FillAll') }}</span>
++            </v-tooltip>
++            <v-tooltip left>
++                <template #activator="{ on, attrs }">
++                    <v-btn
++                        v-bind="attrs"
++                        icon
++                        tile
++                        :disabled="printerIsPrintingOnly"
++                        v-on="on"
++                        @click="allOff">
++                        <v-icon>{{ mdiLightbulbOff }}</v-icon>
++                    </v-btn>
++                </template>
++                <span>{{ $t('Panels.LedStripPanel.AllOff') }}</span>
++            </v-tooltip>
++        </template>
++        <v-card-text class="pt-3 pb-2">
++            <v-row v-if="strips.length > 1" dense>
++                <v-col>
++                    <v-btn-toggle v-model="selectedStrip" mandatory dense class="flex-wrap">
++                        <v-btn v-for="s in strips" :key="s.key" :value="s.key" small class="text-none">
++                            {{ s.name }}
++                        </v-btn>
++                    </v-btn-toggle>
++                </v-col>
++            </v-row>
++            <div
++                class="led-strip-bar"
++                :style="{ gridTemplateColumns: `repeat(${barColumns}, minmax(0, 1fr))` }"
++                @pointerleave="onPointerUp">
++                <div
++                    v-for="(color, idx) in currentColors"
++                    :key="idx"
++                    class="led-strip-led"
++                    :class="{ 'led-strip-led--disabled': printerIsPrintingOnly }"
++                    :style="ledStyle(idx, color)"
++                    :title="$t('Panels.LedStripPanel.Led', { index: idx + 1 })"
++                    @pointerdown.prevent="onPointerDown(idx)"
++                    @pointerenter="onPointerEnter(idx)"
++                    @pointerup="onPointerUp">
++                    <span class="led-strip-index">{{ idx + 1 }}</span>
++                </div>
++            </div>
++            <v-row dense class="mt-2 align-center">
++                <v-col cols="12" class="d-flex flex-wrap align-center">
++                    <button
++                        v-for="preset in presets"
++                        :key="preset.hex"
++                        type="button"
++                        class="led-strip-swatch"
++                        :class="{ 'led-strip-swatch--active': preset.hex === paintColor }"
++                        :style="swatchStyle(preset.hex)"
++                        :title="$t(`Panels.LedStripPanel.Colors.${preset.name}`)"
++                        @click="paintColor = preset.hex" />
++                    <v-menu v-model="showPicker" :close-on-content-click="false" offset-y>
++                        <template #activator="{ on, attrs }">
++                            <v-btn v-bind="attrs" small icon class="ml-1" v-on="on">
++                                <v-icon :color="paintColor === '#000000' ? undefined : paintColor">
++                                    {{ mdiPalette }}
++                                </v-icon>
++                            </v-btn>
++                        </template>
++                        <v-card>
++                            <v-color-picker v-model="paintColor" mode="hexa" hide-mode-switch />
++                        </v-card>
++                    </v-menu>
++                </v-col>
++            </v-row>
++            <v-row dense class="align-center">
++                <v-col class="d-flex align-center">
++                    <v-icon small class="mr-2">{{ mdiBrightness6 }}</v-icon>
++                    <v-slider v-model="brightness" :min="1" :max="100" hide-details dense class="mt-0" />
++                    <span class="ml-2 text-no-wrap" style="min-width: 3em; text-align: right">{{ brightness }}%</span>
++                </v-col>
++            </v-row>
++            <div class="text-caption text--secondary mt-1">{{ $t('Panels.LedStripPanel.Hint') }}</div>
++        </v-card-text>
++    </panel>
++</template>
++
++<script lang="ts">
++import { Component, Mixins, Watch } from 'vue-property-decorator'
++import BaseMixin from '@/components/mixins/base'
++import Panel from '@/components/ui/Panel.vue'
++import { mdiBrightness6, mdiFormatColorFill, mdiLedStripVariant, mdiLightbulbOff, mdiPalette } from '@mdi/js'
++
++interface LedStrip {
++    key: string
++    type: string
++    name: string
++    count: number
++}
++
++const STORAGE_KEY = 'mainsail.ledStripPanel'
++
++@Component({
++    components: { Panel },
++})
++export default class LedStripPanel extends Mixins(BaseMixin) {
++    mdiBrightness6 = mdiBrightness6
++    mdiFormatColorFill = mdiFormatColorFill
++    mdiLedStripVariant = mdiLedStripVariant
++    mdiLightbulbOff = mdiLightbulbOff
++    mdiPalette = mdiPalette
++
++    presets = [
++        { name: 'Red', hex: '#FF0000' },
++        { name: 'Orange', hex: '#FF6000' },
++        { name: 'Yellow', hex: '#FFFF00' },
++        { name: 'Green', hex: '#00FF00' },
++        { name: 'Cyan', hex: '#00FFFF' },
++        { name: 'Blue', hex: '#0000FF' },
++        { name: 'Purple', hex: '#8000FF' },
++        { name: 'Pink', hex: '#FF0080' },
++        { name: 'White', hex: '#FFFFFF' },
++        { name: 'Off', hex: '#000000' },
++    ]
++
++    selectedStrip: string | null = null
++    paintColor = '#FF0000'
++    brightness = 100
++    showPicker = false
++
++    painting = false
++    paintedIndices: number[] = []
++    pendingColors: { [index: number]: number[] } = {}
++
++    created() {
++        try {
++            const saved = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '{}')
++            if (typeof saved.strip === 'string') this.selectedStrip = saved.strip
++            if (typeof saved.color === 'string') this.paintColor = saved.color
++            if (typeof saved.brightness === 'number') this.brightness = saved.brightness
++        } catch {
++            // ignore invalid storage
++        }
++    }
++
++    get strips(): LedStrip[] {
++        const printer = this.$store.state.printer ?? {}
++        const settings = printer.configfile?.settings ?? {}
++
++        return Object.keys(printer)
++            .filter((key) => key.startsWith('neopixel ') || key.startsWith('dotstar '))
++            .map((key) => {
++                const [type, ...rest] = key.split(' ')
++                const name = rest.join(' ')
++                const cfg = settings[key.toLowerCase()] ?? {}
++                const count = (printer[key]?.color_data ?? []).length || cfg.chain_count || 1
++                return { key, type, name, count, pin: String(cfg.pin ?? '') }
++            })
++            .filter((strip) => !strip.name.startsWith('_') && !strip.pin.startsWith('virtual:'))
++            .map(({ key, type, name, count }) => ({ key, type, name, count }))
++            .sort((a, b) => a.name.localeCompare(b.name))
++    }
++
++    get activeStrip(): LedStrip | null {
++        if (!this.strips.length) return null
++        return this.strips.find((s) => s.key === this.selectedStrip) ?? this.strips[0]
++    }
++
++    get currentColors(): number[][] {
++        if (!this.activeStrip) return []
++        const data: number[][] = this.$store.state.printer?.[this.activeStrip.key]?.color_data ?? []
++        const colors: number[][] = []
++        for (let i = 0; i < this.activeStrip.count; i++) {
++            colors.push(this.pendingColors[i] ?? data[i] ?? [0, 0, 0, 0])
++        }
++        return colors
++    }
++
++    get barColumns() {
++        const count = this.activeStrip?.count ?? 1
++        if (count <= 16) return count
++        return Math.ceil(count / Math.ceil(count / 16))
++    }
++
++    get hasLedEffects() {
++        return Object.keys(this.$store.state.printer ?? {}).some((key) => key.startsWith('led_effect '))
++    }
++
++    get paintRgb(): number[] {
++        const hex = (this.paintColor ?? '#000000').replace('#', '').slice(0, 6).padEnd(6, '0')
++        const factor = this.brightness / 100
++        return [0, 2, 4].map((i) => Math.round((parseInt(hex.slice(i, i + 2), 16) / 255) * factor * 1000) / 1000)
++    }
++
++    @Watch('selectedStrip')
++    @Watch('paintColor')
++    @Watch('brightness')
++    saveSettings() {
++        try {
++            window.localStorage.setItem(
++                STORAGE_KEY,
++                JSON.stringify({ strip: this.selectedStrip, color: this.paintColor, brightness: this.brightness })
++            )
++        } catch {
++            // ignore storage errors
++        }
++    }
++
++    @Watch('activeStrip')
++    resetPending() {
++        this.pendingColors = {}
++    }
++
++    ledStyle(idx: number, color: number[]) {
++        const white = color[3] ?? 0
++        const [r, g, b] = [0, 1, 2].map((i) => Math.round(Math.min(1, (color[i] ?? 0) + white) * 255))
++        const lit = r + g + b > 0
++        return {
++            backgroundColor: lit ? `rgb(${r}, ${g}, ${b})` : undefined,
++            boxShadow: lit ? `0 0 10px rgba(${r}, ${g}, ${b}, 0.75)` : undefined,
++        }
++    }
++
++    swatchStyle(hex: string) {
++        if (hex === '#000000') return { background: 'repeating-linear-gradient(45deg, #444 0 4px, #222 4px 8px)' }
++        return { backgroundColor: hex }
++    }
++
++    onPointerDown(idx: number) {
++        if (this.printerIsPrintingOnly) return
++        this.painting = true
++        this.paintedIndices = []
++        this.paintLocal(idx)
++    }
++
++    onPointerEnter(idx: number) {
++        if (this.painting) this.paintLocal(idx)
++    }
++
++    onPointerUp() {
++        if (!this.painting) return
++        this.painting = false
++        this.sendLeds(this.paintedIndices)
++        this.paintedIndices = []
++    }
++
++    paintLocal(idx: number) {
++        if (this.paintedIndices.includes(idx)) return
++        this.paintedIndices.push(idx)
++        this.$set(this.pendingColors, idx, [...this.paintRgb, 0])
++    }
++
++    fillAll() {
++        if (!this.activeStrip) return
++        const all = Array.from({ length: this.activeStrip.count }, (_, i) => i)
++        all.forEach((i) => this.$set(this.pendingColors, i, [...this.paintRgb, 0]))
++        this.sendLeds(all)
++    }
++
++    allOff() {
++        if (!this.activeStrip) return
++        const lines: string[] = []
++        if (this.hasLedEffects) lines.push(`STOP_LED_EFFECTS LEDS="${this.activeStrip.type}:${this.activeStrip.name}"`)
++        lines.push(`SET_LED LED=${this.activeStrip.name} RED=0 GREEN=0 BLUE=0 WHITE=0 SYNC=0`)
++        for (let i = 0; i < this.activeStrip.count; i++) this.$set(this.pendingColors, i, [0, 0, 0, 0])
++        this.runScript(lines)
++    }
++
++    sendLeds(indices: number[]) {
++        if (!this.activeStrip || !indices.length) return
++        const [r, g, b] = this.paintRgb
++        const sorted = [...indices].sort((a, b) => a - b)
++        const lines: string[] = []
++        if (this.hasLedEffects) lines.push(`STOP_LED_EFFECTS LEDS="${this.activeStrip.type}:${this.activeStrip.name}"`)
++        sorted.forEach((idx, n) => {
++            const transmit = n === sorted.length - 1 ? 1 : 0
++            lines.push(
++                `SET_LED LED=${this.activeStrip!.name} INDEX=${idx + 1} RED=${r} GREEN=${g} BLUE=${b} WHITE=0 TRANSMIT=${transmit} SYNC=0`
++            )
++        })
++        this.runScript(lines)
++    }
++
++    runScript(lines: string[]) {
++        const script = lines.join('\n')
++        this.$socket.emit('printer.gcode.script', { script }, { loading: 'led_strip_panel' })
++        // the printer status update replaces the optimistic colors
++        window.setTimeout(() => (this.pendingColors = {}), 1500)
++    }
++}
++</script>
++
++<style scoped>
++.led-strip-bar {
++    display: grid;
++    gap: 6px;
++    padding: 10px 8px 22px;
++    border-radius: 8px;
++    background: rgba(0, 0, 0, 0.25);
++    touch-action: none;
++    user-select: none;
++}
++
++.led-strip-led {
++    position: relative;
++    aspect-ratio: 1;
++    max-width: 44px;
++    width: 100%;
++    margin: 0 auto;
++    border-radius: 50%;
++    border: 2px solid rgba(255, 255, 255, 0.25);
++    background-color: #151515;
++    cursor: pointer;
++    transition: box-shadow 0.15s, background-color 0.15s;
++}
++
++.led-strip-led--disabled {
++    cursor: not-allowed;
++    opacity: 0.6;
++}
++
++.led-strip-index {
++    position: absolute;
++    left: 0;
++    right: 0;
++    bottom: -18px;
++    text-align: center;
++    font-size: 10px;
++    opacity: 0.6;
++}
++
++.led-strip-swatch {
++    width: 26px;
++    height: 26px;
++    margin: 2px 3px;
++    border-radius: 50%;
++    border: 2px solid rgba(255, 255, 255, 0.25);
++    cursor: pointer;
++}
++
++.led-strip-swatch--active {
++    border-color: var(--v-primary-base);
++    outline: 2px solid var(--v-primary-base);
++    outline-offset: 1px;
++}
++</style>
+diff --git a/src/locales/en.json b/src/locales/en.json
+index 538ceb4..ccc1200 100644
+--- a/src/locales/en.json
++++ b/src/locales/en.json
+@@ -736,6 +736,25 @@
+             "Headline": "LED Effects",
+             "StopAll": "Stop All Effects"
+         },
++        "LedStripPanel": {
++            "Headline": "LED Strip",
++            "FillAll": "Fill whole strip",
++            "AllOff": "Strip off",
++            "Led": "LED {index}",
++            "Hint": "Click or drag over the LEDs to paint them with the selected color.",
++            "Colors": {
++                "Red": "Red",
++                "Orange": "Orange",
++                "Yellow": "Yellow",
++                "Green": "Green",
++                "Cyan": "Cyan",
++                "Blue": "Blue",
++                "Purple": "Purple",
++                "Pink": "Pink",
++                "White": "White",
++                "Off": "Off"
++            }
++        },
+         "MachineSettingsPanel": {
+             "Headline": "Machine",
+             "MotionSettings": {
+diff --git a/src/locales/nl.json b/src/locales/nl.json
+index b99db0a..f5effd3 100644
+--- a/src/locales/nl.json
++++ b/src/locales/nl.json
+@@ -706,6 +706,25 @@
+             "SaveInfoDescription": "De nieuwe z-offset is berekend en geregistreerd. Klik op \"SAVE CONFIG\" om de nieuwe z-offset op te slaan in je printer.cf en Klipper te herstarten.",
+             "SaveInfoDescriptionPrint": "De nieuwe z-offset is berekend en geregistreerd. Klik na het printen op \"SAVE CONFIG\" om de nieuwe z-offset op te slaan in je printer.cf en Klipper te herstarten.",
+             "SaveInfoHeadline": "Informatie"
++        },
++        "LedStripPanel": {
++            "Headline": "LED-strip",
++            "FillAll": "Hele strip vullen",
++            "AllOff": "Strip uit",
++            "Led": "Led {index}",
++            "Hint": "Klik of sleep over de leds om ze de gekozen kleur te geven.",
++            "Colors": {
++                "Red": "Rood",
++                "Orange": "Oranje",
++                "Yellow": "Geel",
++                "Green": "Groen",
++                "Cyan": "Cyaan",
++                "Blue": "Blauw",
++                "Purple": "Paars",
++                "Pink": "Roze",
++                "White": "Wit",
++                "Off": "Uit"
++            }
+         }
+     },
+     "PowerDeviceChangeDialog": {
+diff --git a/src/pages/Dashboard.vue b/src/pages/Dashboard.vue
+index 7327676..3352fd7 100644
+--- a/src/pages/Dashboard.vue
++++ b/src/pages/Dashboard.vue
+@@ -87,6 +87,7 @@ import ExtruderControlPanel from '@/components/panels/ExtruderControlPanel.vue'
+ import DashboardMixin from '@/components/mixins/dashboard'
+ import KlippyStatePanel from '@/components/panels/KlippyStatePanel.vue'
+ import LedEffectsPanel from '@/components/panels/LedEffectsPanel.vue'
++import LedStripPanel from '@/components/panels/LedStripPanel.vue'
+ import MachineSettingsPanel from '@/components/panels/MachineSettingsPanel.vue'
+ import MacrogroupPanel from '@/components/panels/MacrogroupPanel.vue'
+ import MacrosPanel from '@/components/panels/MacrosPanel.vue'
+@@ -106,6 +107,7 @@ import WebcamPanel from '@/components/panels/WebcamPanel.vue'
+         ExtruderControlPanel,
+         KlippyStatePanel,
+         LedEffectsPanel,
++        LedStripPanel,
+         MachineSettingsPanel,
+         MacrogroupPanel,
+         MacrosPanel,
+diff --git a/src/plugins/build-release_info.ts b/src/plugins/build-release_info.ts
+index 7cafea2..c1f3f35 100644
+--- a/src/plugins/build-release_info.ts
++++ b/src/plugins/build-release_info.ts
+@@ -20,7 +20,7 @@ export default function buildReleaseInfo(): PluginOption {
+                 await releaseInfoFile.writeFile(
+                     JSON.stringify({
+                         project_name: 'mainsail',
+-                        project_owner: 'mainsail-crew',
++                        project_owner: process.env.RELEASE_OWNER || 'mainsail-crew',
+                         version: `v${versionIdentifier}`,
+                     })
+                 )
+diff --git a/src/store/gui/getters.ts b/src/store/gui/getters.ts
+index 2da2695..f9932a5 100644
+--- a/src/store/gui/getters.ts
++++ b/src/store/gui/getters.ts
+@@ -106,6 +106,14 @@ export const getters: GetterTree<GuiState, RootState> = {
+             allPanels = allPanels.filter((name) => name !== 'led-effects')
+         }
+ 
++        // remove led_strip panel, if no addressable led strip exists in Klipper
++        const existsLedStrip = Object.keys(rootState.printer ?? {}).some(
++            (name) => name.startsWith('neopixel ') || name.startsWith('dotstar ')
++        )
++        if (!existsLedStrip) {
++            allPanels = allPanels.filter((name) => name !== 'led-strip')
++        }
++
+         return allPanels
+     },
+ 
+diff --git a/src/store/variables.ts b/src/store/variables.ts
+index 1646c77..60b516a 100644
+--- a/src/store/variables.ts
++++ b/src/store/variables.ts
+@@ -114,6 +114,7 @@ export const allDashboardPanels = [
+     'extruder-control',
+     'macros',
+     'led-effects',
++    'led-strip',
+     'machine-settings',
+     'miniconsole',
+     'miscellaneous',
+-- 
+2.43.0
+
