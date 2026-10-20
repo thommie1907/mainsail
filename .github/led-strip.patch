@@ -1,18 +1,18 @@
-From 40ee8956300779d19eb3317d4dc1ebc552b9a9e3 Mon Sep 17 00:00:00 2001
+From 365f49089c8de8a916e74db8a4220e85d7445424 Mon Sep 17 00:00:00 2001
 From: claude <claude@local>
 Date: Tue, 20 Oct 2026 14:43:44 +0000
 Subject: [PATCH] feat: add LED strip panel (per-LED color control)
 
 ---
  src/components/mixins/dashboard.ts      |   3 +
- src/components/panels/LedStripPanel.vue | 360 ++++++++++++++++++++++++
- src/locales/en.json                     |  19 ++
- src/locales/nl.json                     |  19 ++
+ src/components/panels/LedStripPanel.vue | 426 ++++++++++++++++++++++++
+ src/locales/en.json                     |  23 ++
+ src/locales/nl.json                     |  23 ++
  src/pages/Dashboard.vue                 |   2 +
  src/plugins/build-release_info.ts       |   2 +-
  src/store/gui/getters.ts                |   8 +
  src/store/variables.ts                  |   1 +
- 8 files changed, 413 insertions(+), 1 deletion(-)
+ 8 files changed, 487 insertions(+), 1 deletion(-)
  create mode 100644 src/components/panels/LedStripPanel.vue
 
 diff --git a/src/components/mixins/dashboard.ts b/src/components/mixins/dashboard.ts
@@ -38,10 +38,10 @@ index 7da3685..8f38282 100644
              case 'miniconsole':
 diff --git a/src/components/panels/LedStripPanel.vue b/src/components/panels/LedStripPanel.vue
 new file mode 100644
-index 0000000..35f7305
+index 0000000..acfb176
 --- /dev/null
 +++ b/src/components/panels/LedStripPanel.vue
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,426 @@
 +<template>
 +    <panel
 +        v-if="klipperReadyForGui && strips.length"
@@ -97,7 +97,10 @@ index 0000000..35f7305
 +                    v-for="(color, idx) in currentColors"
 +                    :key="idx"
 +                    class="led-strip-led"
-+                    :class="{ 'led-strip-led--disabled': printerIsPrintingOnly }"
++                    :class="{
++                        'led-strip-led--disabled': printerIsPrintingOnly,
++                        'led-strip-led--selected': selected.includes(idx),
++                    }"
 +                    :style="ledStyle(idx, color)"
 +                    :title="$t('Panels.LedStripPanel.Led', { index: idx + 1 })"
 +                    @pointerdown.prevent="onPointerDown(idx)"
@@ -116,7 +119,8 @@ index 0000000..35f7305
 +                        :class="{ 'led-strip-swatch--active': preset.hex === paintColor }"
 +                        :style="swatchStyle(preset.hex)"
 +                        :title="$t(`Panels.LedStripPanel.Colors.${preset.name}`)"
-+                        @click="paintColor = preset.hex" />
++                        :disabled="printerIsPrintingOnly"
++                        @click="pickColor(preset.hex)" />
 +                    <v-menu v-model="showPicker" :close-on-content-click="false" offset-y>
 +                        <template #activator="{ on, attrs }">
 +                            <v-btn v-bind="attrs" small icon class="ml-1" v-on="on">
@@ -127,6 +131,16 @@ index 0000000..35f7305
 +                        </template>
 +                        <v-card>
 +                            <v-color-picker v-model="paintColor" mode="hexa" hide-mode-switch />
++                            <v-card-actions>
++                                <v-spacer />
++                                <v-btn
++                                    small
++                                    color="primary"
++                                    :disabled="!selected.length || printerIsPrintingOnly"
++                                    @click="applyPicker">
++                                    {{ $t('Panels.LedStripPanel.Apply') }}
++                                </v-btn>
++                            </v-card-actions>
 +                        </v-card>
 +                    </v-menu>
 +                </v-col>
@@ -134,11 +148,33 @@ index 0000000..35f7305
 +            <v-row dense class="align-center">
 +                <v-col class="d-flex align-center">
 +                    <v-icon small class="mr-2">{{ mdiBrightness6 }}</v-icon>
-+                    <v-slider v-model="brightness" :min="1" :max="100" hide-details dense class="mt-0" />
++                    <v-slider
++                        v-model="brightness"
++                        :min="1"
++                        :max="100"
++                        hide-details
++                        dense
++                        class="mt-0"
++                        @change="applySelected" />
 +                    <span class="ml-2 text-no-wrap" style="min-width: 3em; text-align: right">{{ brightness }}%</span>
 +                </v-col>
 +            </v-row>
-+            <div class="text-caption text--secondary mt-1">{{ $t('Panels.LedStripPanel.Hint') }}</div>
++            <div class="d-flex align-center flex-wrap mt-1">
++                <span class="text-caption text--secondary mr-2">
++                    {{
++                        selected.length
++                            ? $t('Panels.LedStripPanel.Selected', { count: selected.length })
++                            : $t('Panels.LedStripPanel.Hint')
++                    }}
++                </span>
++                <v-spacer />
++                <v-btn x-small text :disabled="printerIsPrintingOnly" @click="selectAll">
++                    {{ $t('Panels.LedStripPanel.SelectAll') }}
++                </v-btn>
++                <v-btn x-small text :disabled="!selected.length" @click="selected = []">
++                    {{ $t('Panels.LedStripPanel.ClearSelection') }}
++                </v-btn>
++            </div>
 +        </v-card-text>
 +    </panel>
 +</template>
@@ -186,8 +222,10 @@ index 0000000..35f7305
 +    brightness = 100
 +    showPicker = false
 +
-+    painting = false
-+    paintedIndices: number[] = []
++    selecting = false
++    selectAdd = true
++    dragged: number[] = []
++    selected: number[] = []
 +    pendingColors: { [index: number]: number[] } = {}
 +
 +    created() {
@@ -267,6 +305,7 @@ index 0000000..35f7305
 +    @Watch('activeStrip')
 +    resetPending() {
 +        this.pendingColors = {}
++        this.selected = []
 +    }
 +
 +    ledStyle(idx: number, color: number[]) {
@@ -286,26 +325,47 @@ index 0000000..35f7305
 +
 +    onPointerDown(idx: number) {
 +        if (this.printerIsPrintingOnly) return
-+        this.painting = true
-+        this.paintedIndices = []
-+        this.paintLocal(idx)
++        this.selecting = true
++        this.selectAdd = !this.selected.includes(idx)
++        this.dragged = []
++        this.toggleSelect(idx)
 +    }
 +
 +    onPointerEnter(idx: number) {
-+        if (this.painting) this.paintLocal(idx)
++        if (this.selecting) this.toggleSelect(idx)
 +    }
 +
 +    onPointerUp() {
-+        if (!this.painting) return
-+        this.painting = false
-+        this.sendLeds(this.paintedIndices)
-+        this.paintedIndices = []
++        this.selecting = false
++        this.dragged = []
 +    }
 +
-+    paintLocal(idx: number) {
-+        if (this.paintedIndices.includes(idx)) return
-+        this.paintedIndices.push(idx)
-+        this.$set(this.pendingColors, idx, [...this.paintRgb, 0])
++    toggleSelect(idx: number) {
++        if (this.dragged.includes(idx)) return
++        this.dragged.push(idx)
++        if (this.selectAdd && !this.selected.includes(idx)) this.selected = [...this.selected, idx]
++        if (!this.selectAdd) this.selected = this.selected.filter((i) => i !== idx)
++    }
++
++    selectAll() {
++        if (!this.activeStrip) return
++        this.selected = Array.from({ length: this.activeStrip.count }, (_, i) => i)
++    }
++
++    pickColor(hex: string) {
++        this.paintColor = hex
++        this.applySelected()
++    }
++
++    applyPicker() {
++        this.applySelected()
++        this.showPicker = false
++    }
++
++    applySelected() {
++        if (!this.selected.length || this.printerIsPrintingOnly) return
++        this.selected.forEach((i) => this.$set(this.pendingColors, i, [...this.paintRgb, 0]))
++        this.sendLeds(this.selected)
 +    }
 +
 +    fillAll() {
@@ -372,6 +432,12 @@ index 0000000..35f7305
 +    transition: box-shadow 0.15s, background-color 0.15s;
 +}
 +
++.led-strip-led--selected {
++    border-color: var(--v-primary-base);
++    outline: 3px solid var(--v-primary-base);
++    outline-offset: 2px;
++}
++
 +.led-strip-led--disabled {
 +    cursor: not-allowed;
 +    opacity: 0.6;
@@ -403,10 +469,10 @@ index 0000000..35f7305
 +}
 +</style>
 diff --git a/src/locales/en.json b/src/locales/en.json
-index 538ceb4..ccc1200 100644
+index 538ceb4..5e25fc7 100644
 --- a/src/locales/en.json
 +++ b/src/locales/en.json
-@@ -736,6 +736,25 @@
+@@ -736,6 +736,29 @@
              "Headline": "LED Effects",
              "StopAll": "Stop All Effects"
          },
@@ -415,7 +481,7 @@ index 538ceb4..ccc1200 100644
 +            "FillAll": "Fill whole strip",
 +            "AllOff": "Strip off",
 +            "Led": "LED {index}",
-+            "Hint": "Click or drag over the LEDs to paint them with the selected color.",
++            "Hint": "Click or drag over LEDs to select them, then pick a color.",
 +            "Colors": {
 +                "Red": "Red",
 +                "Orange": "Orange",
@@ -427,16 +493,20 @@ index 538ceb4..ccc1200 100644
 +                "Pink": "Pink",
 +                "White": "White",
 +                "Off": "Off"
-+            }
++            },
++            "Selected": "{count} selected - pick a color",
++            "SelectAll": "Select all",
++            "ClearSelection": "Clear",
++            "Apply": "Apply"
 +        },
          "MachineSettingsPanel": {
              "Headline": "Machine",
              "MotionSettings": {
 diff --git a/src/locales/nl.json b/src/locales/nl.json
-index b99db0a..f5effd3 100644
+index b99db0a..4eb2bdf 100644
 --- a/src/locales/nl.json
 +++ b/src/locales/nl.json
-@@ -706,6 +706,25 @@
+@@ -706,6 +706,29 @@
              "SaveInfoDescription": "De nieuwe z-offset is berekend en geregistreerd. Klik op \"SAVE CONFIG\" om de nieuwe z-offset op te slaan in je printer.cf en Klipper te herstarten.",
              "SaveInfoDescriptionPrint": "De nieuwe z-offset is berekend en geregistreerd. Klik na het printen op \"SAVE CONFIG\" om de nieuwe z-offset op te slaan in je printer.cf en Klipper te herstarten.",
              "SaveInfoHeadline": "Informatie"
@@ -446,7 +516,7 @@ index b99db0a..f5effd3 100644
 +            "FillAll": "Hele strip vullen",
 +            "AllOff": "Strip uit",
 +            "Led": "Led {index}",
-+            "Hint": "Klik of sleep over de leds om ze de gekozen kleur te geven.",
++            "Hint": "Klik of sleep over leds om ze te selecteren en kies daarna een kleur.",
 +            "Colors": {
 +                "Red": "Rood",
 +                "Orange": "Oranje",
@@ -458,7 +528,11 @@ index b99db0a..f5effd3 100644
 +                "Pink": "Roze",
 +                "White": "Wit",
 +                "Off": "Uit"
-+            }
++            },
++            "Selected": "{count} geselecteerd - kies een kleur",
++            "SelectAll": "Alles selecteren",
++            "ClearSelection": "Wissen",
++            "Apply": "Toepassen"
          }
      },
      "PowerDeviceChangeDialog": {
