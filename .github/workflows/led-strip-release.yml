@@ -89,5 +89,7 @@ jobs:
           gh release create "$V" -R "${{ github.repository }}" \
             --target "${{ github.sha }}" --latest \
             --title "$V" \
-            --notes "Mainsail ${{ steps.up.outputs.tag }} met het extra dashboardpaneel LED-strip (elke led apart een kleur). Broncode van de wijziging: led-strip.patch (GPLv3)." \
-            src/dist/mainsail.zip fork/.github/led-strip.patch
+            --notes "Mainsail ${{ steps.up.outputs.tag }} met het extra dashboardpaneel LED-strip (elke led apart een kleur). Broncode van de wijziging: https://github.com/${{ github.repository }}/blob/${{ github.sha }}/.github/led-strip.patch (GPLv3)." \
+            src/dist/mainsail.zip
+          # LET OP: alleen mainsail.zip uploaden. Moonraker pakt het eerste
+          # bestand van de release; een extra bestand breekt de update.
